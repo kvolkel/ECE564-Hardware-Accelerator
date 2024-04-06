@@ -1,0 +1,416 @@
+module controller(input go, 
+ input 		   clock,
+ output reg 	   finish, //done 
+ output reg 	   filter_write, //done
+ output reg 	   filter_enable,//done 
+ output reg [8:0]  filter_address, //done
+ output reg [15:0] filter_write_data, //done
+
+ output reg [8:0]  data_address, //done 
+ output reg 	   data_write, //done
+ output reg 	   data_enable, //done
+ output reg [15:0] data_write_data, //done
+
+ output reg [2:0]  output_data_address,//done
+ output reg 	   output_enable, //done
+ output reg 	   output_write,//done 
+
+ output reg 	   clear_1, //done
+ output reg [3:0]  RF_1_address, //done
+ output reg 	   r_w_1, // done
+ output reg [3:0]  rf_en_1, //done 
+ output reg 	   dot_hold, //done 
+
+ output reg 	   clear_2, //done
+ output reg [3:0]  RF_2_address_R,//done
+ output reg [3:0]  RF_2_address_W,//done
+ output reg 	   data_ready, //done
+ output reg [1:0]  RF_2_SEL,//done
+ output reg [2:0]  out_SEL, //done
+ output reg [7:0]  dot_SEL/*done*/);
+
+   //10 bit counter, master counter to count throgh the steps
+   reg [9:0] 	   count;
+   reg [3:0] 	   RF_1_counter;	   
+   reg 		   clear_1_;
+   //dot hold 1 variables
+   reg             dot_hold_reg;
+   reg             dot_hold_log;
+   //clear 1 variable
+   reg 		   clear_1_log;
+   //data ready variables
+   reg 		   data_ready_log;
+   reg 		   data_ready_reg;
+   //variables for RF1 address
+   reg [3:0] 	   intermediate_RF1_address;
+   //variables for counters that are used to determine filter vector memory address
+   reg [3:0] 	   V_count;
+   reg [3:0] 	   V_overflow;
+   wire 	   less_33;
+   wire 	   overflow_count_condition;
+   wire 	   overflow;
+   wire 	   V_count_8;
+   wire            count_45;
+   reg [8:0] 	   base;
+   reg [8:0] 	   addr_v;
+   //variables for units needed for the input array address calculations
+   reg [3:0] 	   middle_bits;
+   reg [1:0] 	   mid_counter;
+   wire 	   overflow_mid;
+   reg [3:0] 	   lower_bits;
+   //variables for the RF1 enable controlls
+   reg [3:0] 	   inter_RF1_en;
+   reg [3:0] 	   RF1_en_log;
+   //variables for clear_2 signal
+   reg 		   inter_clear2;
+   wire 	   clear_2_log;
+   //variables for output enable
+   wire 	   out_en_log;
+   reg 		   inter_out_en;
+   //variables for output data select
+   reg [2:0] 	   out_SEL_log;
+   reg [2:0] 	   inter_out_SEL;
+   //dot select variables for the 2nd step
+   reg [2:0] 	   dot_SEL_counter;
+   reg [2:0] 	   inter_dot_SEL;
+   reg [7:0] 	   dot_SEL_log;	   
+   //variables for RF2 write address
+   reg  [3:0] RF2_W_address;
+   wire [3:0] RF2_add;
+   reg  [2:0]  RF2_W_counter;
+   wire [2:0] RF2_counter_add;
+   reg  [3:0]  intermediate_RF2_W_address;
+   //variables for the RF2 read address
+   reg [3:0]   RF2_Read_address;
+   reg [2:0]   RF2_Read_counter;
+   wire        RF2_read_counter_overflow;
+   wire [2:0]  RF2_read_counter_addition;
+   reg [3:0]   intermediate_RF2_R_address;
+   
+   
+   
+   
+		  
+		 
+   
+   //enables on memories
+   always @(posedge clock) begin
+      filter_write<=1'b0;
+      filter_enable<=1'b1;
+      data_write<=1'b0;
+      data_enable<=1'b1;
+      filter_write_data<=15'd0;
+      data_write_data<=15'd0;
+      output_write<=1'b1;
+   end
+   //finish flag
+   always @ (posedge clock) begin
+      if(count==10'd528) finish<=1;
+      else finish<=0;
+   end
+   
+   //increment master counter
+   always @(posedge clock) begin
+      if(go) begin
+	 count<=10'd0;
+	 RF_1_counter<=3'd0;
+      end
+      else begin
+	 count<=count+10'd1;
+	 //increment on the register file address counter, if count is 8 flip it over for overflow
+	 if(RF_1_counter!=8)
+	   RF_1_counter<=RF_1_counter+3'd1;
+	 else
+	   RF_1_counter<=4'd0;
+      end // else: !if(go)
+      //fix the RF 1 address to 0 after it is not used anymore
+      if(dot_hold_log) RF_1_counter<=3'd0;
+   end
+
+
+
+   
+   //blocks for the V_counter variables, generation of the vector data addressses
+   assign less_33=(count<10'd33);
+   assign V_count_8=V_count==4d'8;
+   assign overflow_count_condition=(V_overflow == 4'd3 && V_count_8);
+   assign count_45=count==10'd45;
+   assign overflow=(less_33 & V_count_8)|(~less_33 & V_count == 4d'7);
+
+   //generation of addresses of filter vector when count is less than 33
+   always @(posedge clock) begin
+      if(go || count_45 || overflow) V_count<=4'd0;
+      else V_count<=V_count+4'd1;
+   end
+
+   always @(posedge clock) begin
+      if(go||count_45||overflow_count_condition) V_overflow<=4'd0;
+      else V_overflow<=V_overflow+{8{1'b0},overflow};
+   end
+
+   //register for the filter address
+   always @ (posedge clock) begin
+      if(less_33) filter_address<={0,V_overflow,V_count};
+      else if(!less_33 && count<46) filter_address<=9'd0;
+      else if(count==10'd520) filter_address<=9'd0;
+      else filter_address<=addr_v;
+   end
+   //generate addresses for the step 2 filter vectors
+   always @ (posedge clock) begin
+      if(count<10'd47 || go) base<=base+9'h40;
+      else if (overflow_count_condition) base<=9'd1;
+      else base<=base;
+   end
+   
+   always @ (posedge clock) begin
+      if(count<10'd47) addr_v<=base;
+      else if (overflow_count_condition) addr_v<=base+9'd1;
+      else if(V_count==4'd8) begin
+	 if(V_overflow==4'd0) addr_v<=base+9'd16;
+	 else if(V_overflow==4'd1) addr_v<=base+9'd32;
+	 else if (V_overflow==4'd2) addr_v<=base+9'd48;
+	 else if (V_overflow==4'd3) addr_v<=base+9'd64;
+      end
+      else addr_v<=addr_v+9'h4;
+   end // always @ (posedge clock)
+  
+
+   
+
+ 
+   //blocks for the input array address
+   
+   always @(posedge clock) begin
+      if(count<10'd33 || overflow_mid) begin
+	 mid_counter<=2'd0;
+	 middle_bits<=4'd0;
+	 lower_bits<=4'd0;
+      end
+      else mid_counter<=mid_counter+2'd1;
+   end
+
+   
+   assign overflow_mid=mid_counter==2'd2;
+   //generation of the middle 4 bits of address
+   always @(posedge clock) begin
+      if(count==10'd50 || count==10'd86) middle_bits<=4'd3;
+      else if(count==10'd68) middle_bits<=4'd0;
+      else if(count==10'd104 || count==10'd140)middle_bits<=4'd6;
+      else if(count==10'd122 || count==10'd158) middle_bits<=4'd9;
+      else if(middle_bits==4'd2) middle_bits<=4'd0;
+      else if (middle_bits==4'd5) middle_bits<=4'd3;
+      else if (middle_bits==4'd8) middle_bits<=4'd6;
+      else if (middle_bits==4'd11) middle_bits<=4'd9;
+      else if (count>10'd176) middle_bits<=4'd0;
+      else middle_bits<=middle_bits+overflow_mid;
+   end // always @ (posedge clock)
+   
+   //generation of the lower four bits of data address
+   always @(posedge clock) begin
+      if(count==10'd50 || count==10'd104 || count==10'd122) lower_bits<=4'd0;
+      else if(count==10'd41 || count==10'd59  || count==10d'113 || count==10'd131) lower_bits<=4'd3;
+      else if(count==10'd68 || count==10'd86  || count==10d'140 || count==10'd158) lower_bits<=4'd6;
+      else if(count==10'd77 || count==10'd95  || count==10d'149 || count==10'd167) lower_bits<=4'd9;
+      else if (lower_bits==4'd2) lower_bits<=4'd0;
+      else if (lower_bits==4'd5) lower_bits<=4'd3;
+      else if (lower_bits==4'd8) lower_bits<=4'd6;
+      else if (lower_bits==4'd11) lower_bits<=4'd9;
+      else if(count>10'd176) lower_bits<=4'd0;
+      else lower_bits<=lower_bits+4'd1;
+   end // always @ (posedge clock)
+
+   //register for the data address
+   always @(posedge clock) begin
+      data_address<={1'b0,middle_bits,lower_bits};
+   end
+   
+   //logic for RF1 enables
+   always @(*) begin
+      if(count>=10'd0 && count<=10'd8) RF1_en_log=4'b0001;
+      else if(count>=10'd9 && count<=10'd16) RF1_en_log=4'b0010;
+      else if(count>=10'd17 && count<=10'd24) RF1_en_log=4'b0100;
+      else if(count>=10'd25 && count<10'd32) RF1_en_log=4'b1000;
+      else RF1_en_log=4'b1000;
+   end
+   
+   
+   //logic for clear 2 signal
+   assign clear_2_log=count<=10'd45;
+
+   //logic for output enable
+   assign out_en_log= (count>=10'd520)&(count<=1='d527);
+
+   //logic for output data select
+   always @(*) begin
+      case(count):
+	10'd520: out_SEL_log=3'd0;
+	10'd521: out_SEL_log=3'd1;
+	10'd522: out_SEL_log=3'd2;
+	10'd523: out_SEL_log=3'd3;
+	10'd524: out_SEL_log=3'd4;
+	10'd525: out_SEL_log=3'd5;
+	10'd526: out_SEL_log=3'd6;
+	10'd527: out_SEL_log=3'd7;
+      endcase // case (count)
+   end // always @ begin
+   
+
+   
+   //logic for clear_1 signal
+   always @(*) begin
+      if(count<=10'd32) clear_1_log=1'b1;
+      else clear_1_log=1'b0;
+   end
+   
+   //logic for dot_hold for first step
+   always @(*) begin
+      if(count>10'd176) dot_hold_log=1'b1;
+      else dot_hold_log=1'b0;
+   end
+   //logic for dot select
+   always @(posedge clock) begin
+      if(count<10'd43) dot_SEL_counter<=3'd0;
+      else dot_SEL_counter<=dot_SEL_counter+3'd1;
+   end
+
+   //combinational logic for dot selector, disables once 520 on the count is reached (done with computations)
+   always @ (*) begin
+      if(count>=10'd520) dot_SEL_log=8'hff;
+      else if(count<=10'd45) dot_SEL_log=8'h00;
+      else if(dot_SEL_counter==3'd0) dot_SEL_log=8'b00000000;
+      else if(dot_SEL_counter==3'd1) dot_SEL_log=8'b00000001;
+      else if(dot_SEL_counter==3'd2) dot_SEL_log=8'b00000100;
+      else if(dot_SEL_counter==3'd3) dot_SEL_log=8'b00001000;
+      else if(dot_SEL_counter==3'd4) dot_SEL_log=8'b00010000;
+      else if(dot_SEL_counter==3'd5) dot_SEL_log=8'b00100000;
+      else if(dot_SEL_counter==3'd6) dot_SEL_log=8'b01000000;
+      else if(dot_SEL_counter==3'd7) dot_SEL_log=8'b10000000;
+   end // always @ begin
+   
+
+   
+
+
+   //logic for RF2 Write address, one register regulates the address output from the address register
+   assign RF2_add=RF2_W_address+4'd1;
+   assign RF2_counter_add=RF2_W_counter+3'd1;
+
+   always @ (posedge clock) begin
+      if(count<=10'd41) RF2_W_address<=4'd0;
+      else if((count>=10'd42 && count<=10'd44)||RF2_W_counter==3'd5) RF2_W_address<=RF2_add;
+      else if(RF2_W_counter!=3'd5) RF2_W_address<=RF2_W_address;
+   end
+   
+   //counter that controlls the write address counter
+   always @ (posedge clock) begin
+      if(RF2_add==4'd2 || RF2_add==4'd6 ||RF2_add==4'd10 || RF2_add==4'd14) RF2_W_counter<=3'd0;
+      else if(RF2_counter_add==6) RF2_W_counter<=RF2_W_counter;
+      else RF2_W_counter<=RF2_counter_add;
+   end
+
+   
+   //logic for the RF2 select lines, selects which data to bring to the register file
+   always @(*) begin
+      case (RF2_W_address) begin
+	 4'd0: RF_2_SEL=2'b00; 
+	 4'd1: RF_2_SEL=2'b01;
+	 4'd2: RF_2_SEL=2'b10;
+	 4'd3: RF_2_SEL=2'b11;
+	 4'd4: RF_2_SEL=2'b00; 
+	 4'd5: RF_2_SEL=2'b01;
+	 4'd6: RF_2_SEL=2'b10;
+	 4'd7: RF_2_SEL=2'b11;
+	 4'd8: RF_2_SEL=2'b00; 
+	 4'd9: RF_2_SEL=2'b01;
+	 4'd10: RF_2_SEL=2'b10;
+	 4'd11: RF_2_SEL=2'b11;
+	 4'd12: RF_2_SEL=2'b00; 
+	 4'd13: RF_2_SEL=2'b01;
+	 4'd14: RF_2_SEL=2'b10;
+	 4'd15: RF_2_SEL=2'b11;
+	 
+      endcase // case (RF2_W_address)
+   end // always @ begin
+
+   //design for calcuating the RF2 read addresses
+   {RF2_read_counter_overflow,RF2_read_counter_addition}=RF2_Read_counter+3'd1;
+   always @(posedge clock) begin
+      if(count<=10'd44) RF2_Read_address<=4'd0;
+      else RF2_Read_address<=RF2_Read_address+RF2_read_counter_overflow;
+   end
+   
+   always @(posedge clock) begin
+      if(count<=10'd44) RF2_Read_counter<=3'd0;
+      else RF2_Read_counter<=RF2_read_counter_addition;
+   end
+   
+   
+   
+   //extra delay for control signals due to memory registering
+   always @(posedge clock)begin
+      //clear 1 registers
+      clear_1<=clear_1_;
+      clear_1_<=clear_1_log;
+      //read write 1
+      r_w_1<=clear_1_;
+      //dot hold 1
+      dot_hold<=dot_hold_reg;
+      dot_hold_reg<=dot_hold_log;
+      //data ready flag
+      data_ready<=data_ready_reg;
+      data_ready_reg<=data_ready_log;
+      //RF1 addreess
+      RF_1_address<=intermediate_RF1_address;
+      intermediate_RF1_address<=RF_1_counter;
+      //RF1 enables
+      rf_en_1<=inter_RF1_en;
+      inter_RF1_en<=RF1_en_log;
+      //clear 2 signal
+      clear_2<=inter_clear2;
+      inter_clear2<=clear_2_log;
+      //output enable signal
+      output_enable<=inter_out_en;
+      inter_out_en<=out_en_log;
+      //output data select line
+      out_SEL<=inter_out_SEL;
+      inter_out_SEL<=out_SEL_log;
+      //output address
+      output_data_address<=inter_out_SEL;
+      //dot select for step 2
+      dot_SEL<=inter_dot_SEL;
+      inter_dot_SEL<=dot_SEL_log;
+      //RF2 write address
+      intermediate_RF2_W_address<=RF2_W_address;
+      RF_2_address_W<=intermediate_RF2_W_address;
+      //RF2 read adress
+      intermediate_RF2_R_address<=RF2_Read_address;
+      RF_2_address_R<=intermediate_RF2_R_address;
+      
+   end // always @ (posedge clock)
+   
+
+   //logic for data ready flag
+   always @(*) begin
+      case(count):
+	10'd41:data_ready_log=1'd1;
+	10'd50:data_ready_log=1'd1;
+	10'd59:data_ready_log=1'd1;
+	10'd68:data_ready_log=1'd1;
+	10'd77:data_ready_log=1'd1;
+	10'd86:data_ready_log=1'd1;
+	10'd95:data_ready_log=1'd1;
+	10'd104:data_ready_log=1'd1;
+	10'd113:data_ready_log=1'd1;
+	10'd122:data_ready_log=1'd1;
+	10'd131:data_ready_log=1'd1;
+	10'd140:data_ready_log=1'd1;
+	10'd149:data_ready_log=1'd1;
+	10'd158:data_ready_log=1'd1;
+	10'd167:data_ready_log=1'd1;
+	10'd176:data_ready_log=1'd1;
+	default: data_ready_log=1'd0;
+      endcase // case (count)
+   end // always @ begin
+   
+      
+endmodule // controller
